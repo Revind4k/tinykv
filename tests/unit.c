@@ -200,6 +200,7 @@ static void test_out(void) {
     out_null(&o);
     out_array(&o, 2);
     out_errorf(&o, "ERR bad\r\ninjected");
+    out_raw(&o, NULL, 0); /* appending an empty, never-allocated buffer (KEYS with no match) */
     const char *want = "+OK\r\n:-42\r\n$4\r\na\r\nb\r\n$-1\r\n*2\r\n-ERR bad  injected\r\n";
     CHECK(o.len == strlen(want) && memcmp(o.buf, want, o.len) == 0);
     out_free(&o);
