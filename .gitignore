@@ -1,0 +1,10 @@
+/tinykv
+/tinykv-asan
+/unit-tests
+/fuzz-resp
+*.dSYM/
+*.aof
+crash-*
+leak-*
+timeout-*
+__pycache__/

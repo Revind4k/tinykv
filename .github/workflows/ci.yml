@@ -1,0 +1,35 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]   # epoll and kqueue backends
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install redis-server (for the differential tests)
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -q && sudo apt-get install -yq redis-server
+          else brew install redis; fi
+      - name: Build (-Wall -Wextra -Wpedantic -Werror)
+        run: make tinykv
+      - name: Unit tests (ASan + UBSan)
+        run: make unit
+      - name: Integration + differential tests against the sanitizer build
+        run: make test
+      - name: tinykv --version
+        run: ./tinykv --version
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: make fuzz-resp
+      - name: Fuzz the RESP parser for 60 s
+        run: ./fuzz-resp -max_total_time=60 -max_len=4096 fuzz/corpus
