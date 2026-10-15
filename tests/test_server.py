@@ -276,13 +276,19 @@ class Behavior(unittest.TestCase):
             self.c.value("PING")
 
     def test_slow_reader_does_not_block_others(self):
-        self.c.value("SET", "v", b"x" * (1 << 20))
-        hog = socket.create_connection(("127.0.0.1", self.srv.port))
-        hog.sendall(encode("GET", "v") * 200)  # ~200 MB of replies it never reads
+        value = b"x" * (1 << 20)
+        self.c.value("SET", "v", value)
+        hog = Conn(self.srv.port)
+        hog.sock.sendall(encode("GET", "v") * 200)  # ~200 MB of replies, not read yet
         time.sleep(0.3)
-        start = time.time()
-        self.assertEqual(self.c.value("PING"), "PONG")
-        self.assertLess(time.time() - start, 0.5)
+        for _ in range(5):  # other clients stay fast while the hog's replies back up
+            start = time.time()
+            self.assertEqual(self.c.value("PING"), "PONG")
+            self.assertLess(time.time() - start, 0.1)
+        # Backpressure must pause the hog, not drop work: once it reads, it gets every reply.
+        for i in range(200):
+            self.assertEqual(decode(hog.raw_reply()), value, f"reply {i}")
+        self.assertEqual(hog.value("PING"), "PONG")
         hog.close()
 
     def test_200_concurrent_clients(self):
