@@ -142,6 +142,7 @@ static int reserve(outbuf *o, size_t n) {
 }
 
 void out_raw(outbuf *o, const char *s, size_t n) {
+    if (n == 0) return; /* s may be NULL here (an empty buffer); memcpy(dst, NULL, 0) is UB */
     if (reserve(o, n) == 0) {
         memcpy(o->buf + o->len, s, n);
         o->len += n;
