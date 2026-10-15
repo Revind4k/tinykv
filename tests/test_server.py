@@ -33,11 +33,13 @@ def free_port():
 class Server:
     def __init__(self, argv, port):
         self.port = port
-        self.proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # stderr goes to a file, not a pipe: a sanitizer report must survive the crash it describes.
+        self.logf = tempfile.TemporaryFile()
+        self.proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=self.logf)
         deadline = time.time() + 10
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                raise RuntimeError(f"server exited early: {self.proc.stderr.read().decode()}")
+                raise RuntimeError(f"server exited early: {self.log()}")
             try:
                 socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
                 return
@@ -45,13 +47,17 @@ class Server:
                 time.sleep(0.02)
         raise RuntimeError("server did not start")
 
+    def log(self):
+        self.logf.seek(0)
+        return self.logf.read().decode(errors="replace")
+
     def stop(self, sig=signal.SIGTERM):
         if self.proc.poll() is None:
             self.proc.send_signal(sig)
             self.proc.wait(10)
-        err = self.proc.stderr.read().decode()
-        self.proc.stderr.close()
-        return err
+        out = self.log()
+        self.logf.close()
+        return out
 
 
 def tinykv(*args, port=None):
@@ -167,7 +173,11 @@ class Differential(unittest.TestCase):
         self.b.raw("FLUSHALL")
 
     def same(self, *cmd):
-        ra, rb = self.a.raw(*cmd), self.b.raw(*cmd)
+        try:
+            ra = self.a.raw(*cmd)
+        except ConnectionError:
+            self.fail(f"tinykv dropped the connection on {cmd!r}; server log:\n{self.tk.log()[-4000:]}")
+        rb = self.b.raw(*cmd)
         if cmd[0].upper() == "KEYS":
             ra, rb = sorted_array(ra), sorted_array(rb)
         self.assertEqual(ra, rb, f"{cmd!r}\n tinykv: {ra!r}\n redis:  {rb!r}")
