@@ -18,14 +18,14 @@ OK
 
 | Command | Pipeline | tinykv req/s | Redis req/s | tinykv / Redis |
 |---|---|---|---|---|
-| SET | 1 | 240,732 | 251,130 | 0.96× |
-| GET | 1 | 241,663 | 248,880 | 0.97× |
-| INCR | 1 | 245,942 | 250,501 | 0.98× |
-| SET | 16 | 2,717,391 | 1,766,784 | 1.54× |
-| GET | 16 | 2,824,859 | 2,212,390 | 1.28× |
-| INCR | 16 | 2,403,846 | 2,304,148 | 1.04× |
+| SET | 1 | 238,777 | 251,383 | 0.95× |
+| GET | 1 | 243,191 | 249,377 | 0.98× |
+| INCR | 1 | 245,459 | 250,376 | 0.98× |
+| SET | 16 | 2,673,797 | 1,779,360 | 1.50× |
+| GET | 16 | 2,840,909 | 2,222,222 | 1.28× |
+| INCR | 16 | 2,358,490 | 2,293,578 | 1.03× |
 
-Without pipelining, both servers are bound by the per-request system calls and the benchmark client, and they land within 4% of each other. With pipelining, tinykv pulls ahead because it does much less per command. Redis tracks memory, enforces ACLs, fires keyspace notifications, supports client tracking, and has many more data types behind every lookup. **This shows the core is lean, not that it's a better Redis.** On the same machine the client competes with the server for CPU, so treat the absolute numbers as relative.
+Without pipelining, both servers are bound by the per-request system calls and the benchmark client, and they land within 5% of each other. With pipelining, tinykv pulls ahead because it does much less per command. Redis tracks memory, enforces ACLs, fires keyspace notifications, supports client tracking, and has many more data types behind every lookup. **This shows the core is lean, not that it's a better Redis.** On the same machine the client competes with the server for CPU, so treat the absolute numbers as relative.
 
 ## Design
 
@@ -53,7 +53,7 @@ Without pipelining, both servers are bound by the per-request system calls and t
 **Defensive limits:**
 - 1 GB query buffer, 512 MB bulk string, 1M arguments, and 64 KB inline commands.
 - Malformed frames get `-ERR Protocol error` and the connection is closed.
-- A client that stops reading is cut off at 256 MB of unread replies, and other clients are never blocked by it. The test suite checks this with a client that requests 200 MB and never reads.
+- Output has backpressure. Once a client has more than 1 MB of unsent replies, tinykv stops executing its pipeline and stops reading its socket until the replies drain, then resumes exactly where it stopped. A client that pipelines 200 GETs of a 1 MB value and doesn't read can't make the loop build 200 MB of replies in one pass. That would stall everyone else (it took 1.2 s on a CI runner before this was added) and grow memory without bound. A single reply larger than 1 GB closes the connection.
 - The server binds to 127.0.0.1 unless told otherwise.
 
 ## Commands
@@ -67,7 +67,7 @@ make test        # unit tests + integration suite, against an ASan + UBSan build
 make bench
 ```
 
-- **Differential tests against real Redis.** About 100 scripted commands (error paths, integer overflow at both ends, option conflicts, binary keys and values with `\0` and `\r\n`, inline protocol), then **5,000 randomized operations** over 25 colliding keys. Every reply must match Redis byte for byte, error messages included. This caught one difference before release: Redis words the `DECRBY key -9223372036854775808` overflow as `ERR decrement would overflow`.
+- **Differential tests against real Redis.** About 100 scripted commands (error paths, integer overflow at both ends, option conflicts, binary keys and values with `\0` and `\r\n`, inline protocol), then **5,000 randomized operations** over 25 colliding keys. Every reply must match Redis byte for byte, error messages included. Ubuntu CI compares against the distribution's redis-server, and macOS CI against the current Homebrew release.
 - **Persistence:**
   - Kill -9 with `appendfsync always`, then restart.
   - A TTL survives `INCR` across restart.
@@ -79,13 +79,19 @@ make bench
   - A 20 MB value.
   - A request dribbled one byte at a time.
   - A protocol error.
-  - A slow reader.
+  - A slow reader: other clients stay under 100 ms, and the reader still gets all 200 replies once it reads.
   - 200 concurrent clients.
   - Active expiry clearing 5,000 keys nobody reads.
 - **Unit tests** (C, 401k checks):
   - The parser is checked at every possible split point of a request, on pipelines, and on 9 classes of malformed input.
   - The hash table stays correct across 100k inserts with lookups mid-rehash, plus shrinking, binary keys and TTL-index consistency.
 - **Fuzzing.** CI runs a libFuzzer target over the RESP parser for 60 s per push under ASan + UBSan. It asserts the parser always makes progress and that every argument lies inside its frame.
+
+## Bugs CI caught before release
+
+- **Undefined behavior on Linux only.** `KEYS` with no matches appended an empty, never-allocated buffer with `memcpy(dst, NULL, 0)`. macOS tolerated it; glibc declares that argument non-null, and UBSan on the Linux runner aborted. Fixed, with a regression test.
+- **A latency stall under a slow reader.** It showed up as a flaky timing test on the macOS runner and led to the backpressure design above. The test now also requires the paused client to receive all 200 replies intact and in order.
+- **A wording difference from Redis.** `DECRBY key -9223372036854775808` overflows differently from other overflows; the differential suite caught it.
 
 ## Limits
 

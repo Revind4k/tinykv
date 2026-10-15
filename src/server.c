@@ -33,7 +33,13 @@
 #define TINYKV_VERSION "0.1.0"
 #define READ_CHUNK (16 * 1024)
 #define MAX_QUERY_BUF (1024L * 1024 * 1024) /* same default as Redis' client-query-buffer-limit */
-#define MAX_PENDING_OUT (256L * 1024 * 1024)
+/* Backpressure: once a client has this much unsent output, stop executing its pipeline and
+ * stop reading its socket until the replies drain. A client that pipelines 200 GETs of a
+ * 1 MB value and never reads would otherwise make the loop build 200 MB of replies in one
+ * pass, stalling every other client and growing memory without bound. */
+#define OUT_SOFT_LIMIT (1L * 1024 * 1024)
+/* Hard cap for a single enormous reply (a 512 MB value, KEYS over a huge keyspace). */
+#define MAX_PENDING_OUT (1024L * 1024 * 1024)
 #define CRON_MS 100
 #define AUTO_REWRITE_MIN (64L * 1024 * 1024)
 
@@ -47,6 +53,7 @@ typedef struct client {
     outbuf out;
     argvec argv;
     int close_after_reply;
+    int paused;           /* input held back until output drains (see OUT_SOFT_LIMIT) */
     int pending;
     struct client *next_pending;
 } client;
@@ -899,6 +906,10 @@ static void queue_reply(client *c) {
 static void process_input(client *c) {
     size_t pos = 0;
     while (pos < c->qlen && !c->close_after_reply) {
+        if (c->out.len - c->out.sent > (size_t)OUT_SOFT_LIMIT) {
+            c->paused = 1;
+            break;
+        }
         size_t used;
         const char *err;
         int r = resp_parse(c->qbuf + pos, c->qlen - pos, &used, &c->argv, &err);
@@ -918,6 +929,7 @@ static void process_input(client *c) {
 }
 
 static void on_readable(client *c) {
+    if (c->paused) return; /* a stale event from this batch; reading resumes after drain */
     if (c->qcap - c->qlen < READ_CHUNK) {
         size_t cap = c->qcap ? c->qcap * 2 : READ_CHUNK * 2;
         while (cap - c->qlen < READ_CHUNK) cap *= 2;
@@ -949,34 +961,44 @@ static void on_readable(client *c) {
     queue_reply(c);
 }
 
-/* Returns 0 if the client is still open. */
+/* Writes as much queued output as the socket takes. When everything is out, a paused
+ * client's buffered input is executed again. Returns 0 if the client is still open. */
 static int flush_client(client *c) {
-    while (c->out.sent < c->out.len) {
-        ssize_t n = write(c->fd, c->out.buf + c->out.sent, c->out.len - c->out.sent);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN) break;
-            client_free(c);
-            return -1;
+    for (;;) {
+        while (c->out.sent < c->out.len) {
+            ssize_t n = write(c->fd, c->out.buf + c->out.sent, c->out.len - c->out.sent);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN) break;
+                client_free(c);
+                return -1;
+            }
+            c->out.sent += (size_t)n;
         }
-        c->out.sent += (size_t)n;
-    }
-    if (c->out.sent == c->out.len) {
+        if (c->out.sent < c->out.len) break; /* socket full: wait for writability */
         c->out.len = c->out.sent = 0;
         if (c->out.cap > 1 << 20) out_free(&c->out); /* don't hold a big buffer forever */
         if (c->close_after_reply) {
             client_free(c);
             return -1;
         }
-        set_mask(c, EV_READ);
-    } else {
-        if (c->out.len - c->out.sent > (size_t)MAX_PENDING_OUT) {
-            logf_("closing client fd=%d: over %ld bytes of unread replies", c->fd, MAX_PENDING_OUT);
+        if (!c->paused) {
+            set_mask(c, EV_READ);
+            return 0;
+        }
+        c->paused = 0; /* drained: run the commands that were waiting */
+        process_input(c);
+        if (c->out.oom) {
             client_free(c);
             return -1;
         }
-        set_mask(c, EV_READ | EV_WRITE);
     }
+    if (c->out.len - c->out.sent > (size_t)MAX_PENDING_OUT) {
+        logf_("closing client fd=%d: over %ld bytes of unread replies", c->fd, MAX_PENDING_OUT);
+        client_free(c);
+        return -1;
+    }
+    set_mask(c, c->paused ? EV_WRITE : EV_READ | EV_WRITE);
     return 0;
 }
 
