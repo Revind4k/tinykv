@@ -41,7 +41,7 @@ Without pipelining, both servers are bound by the per-request system calls and t
 **Expiry, lazy and active.** A key past its TTL is deleted when it's next touched. A 100 ms cron also samples 20 keys with TTLs at random and repeats while more than a quarter of a sample was expired, within a 1 ms budget. That reclaims keys nobody reads again. Sampling is O(1) because keys with TTLs are kept in a dense array, where each entry stores its own index and is swap-removed when deleted.
 
 **Append-only file:**
-- **Exact replay.** Writes are logged as RESP. Relative times are logged as absolute (`SET … EX 100` becomes `SET … PXAT <ms>`, `EXPIRE` becomes `PEXPIREAT`), so replaying later gives the same state.
+- **Exact replay.** Writes are logged as RESP. Relative times are logged as absolute (`SET … EX 100` becomes `SET … PXAT <ms>`, `EXPIRE` and `GETEX … EX` become `PEXPIREAT`), so replaying later gives the same state.
 - **No expiry during replay.** Nothing expires while the log replays. A key that expires before `INCR` runs could otherwise come back as a TTL-less `1`, and a test covers that case.
 - **Truncated tail.** A crash mid-write leaves a partial last command. It's truncated away at startup, with a warning, and the server starts. Corruption anywhere else refuses to start, with the byte offset.
 
@@ -58,7 +58,7 @@ Without pipelining, both servers are bound by the per-request system calls and t
 
 ## Commands
 
-`GET SET` (with `NX XX GET EX PX EXAT PXAT KEEPTTL`), `SETNX GETDEL MGET MSET DEL UNLINK EXISTS INCR DECR INCRBY DECRBY APPEND STRLEN`, `EXPIRE PEXPIRE EXPIREAT PEXPIREAT` (with `NX XX GT LT`), `TTL PTTL PERSIST TYPE KEYS` (glob, linear-time matcher), `DBSIZE FLUSHALL FLUSHDB SELECT 0 PING ECHO INFO BGREWRITEAOF SHUTDOWN QUIT`, and inline commands (`telnet`-style).
+`GET SET` (with `NX XX GET EX PX EXAT PXAT KEEPTTL`), `SETNX GETDEL GETEX MGET MSET DEL UNLINK EXISTS INCR DECR INCRBY DECRBY APPEND STRLEN`, `EXPIRE PEXPIRE EXPIREAT PEXPIREAT` (with `NX XX GT LT`), `TTL PTTL PERSIST TYPE KEYS` (glob, linear-time matcher), `DBSIZE FLUSHALL FLUSHDB SELECT 0 PING ECHO INFO BGREWRITEAOF SHUTDOWN QUIT`, and inline commands (`telnet`-style).
 
 ## Tests
 
@@ -67,10 +67,11 @@ make test        # unit tests + integration suite, against an ASan + UBSan build
 make bench
 ```
 
-- **Differential tests against real Redis.** About 100 scripted commands (error paths, integer overflow at both ends, option conflicts, binary keys and values with `\0` and `\r\n`, inline protocol), then **5,000 randomized operations** over 25 colliding keys. Every reply must match Redis byte for byte, error messages included. Ubuntu CI compares against the distribution's redis-server, and macOS CI against the current Homebrew release.
+- **Differential tests against real Redis.** About 130 scripted commands (error paths, integer overflow at both ends, option conflicts, binary keys and values with `\0` and `\r\n`, inline protocol), then **5,000 randomized operations** over 25 colliding keys. Every reply must match Redis byte for byte, error messages included. Ubuntu CI compares against the distribution's redis-server, and macOS CI against the current Homebrew release.
 - **Persistence:**
   - Kill -9 with `appendfsync always`, then restart.
   - A TTL survives `INCR` across restart.
+  - `GETEX` is logged as the `PEXPIREAT`, `PERSIST` or `DEL` it amounts to, so a relative TTL replays as the same absolute time.
   - Truncated-tail recovery.
   - A corrupt file refuses to start.
   - `BGREWRITEAOF` over 50,000 writes shrinks the file more than 10×, keeps 500 writes that raced the child, and keeps TTLs.

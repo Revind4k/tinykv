@@ -205,6 +205,13 @@ class Differential(unittest.TestCase):
             ("SET", "x", "v", "NX", "XX"), ("SET", "x", "v", "BOGUS"), ("SET", "x", "v", "EX", "10", "KEEPTTL"),
             ("SET", "x", "v", "EX", "10", "EX", "20"), ("TTL", "x"), ("SET", "x", "v", "PX", "abc", "PX", "5000"), ("PTTL", "x"),
             ("SET", "x", "v", "EX", "abc", "BOGUS"), ("SET", "x", "v", "EX", "abc", "NX", "XX"), ("SET", "x", "v", "PXAT", "1"), ("EXISTS", "x"),
+            ("SET", "g", "v"), ("GETEX", "g"), ("TTL", "g"), ("GETEX", "g", "EX", "100"), ("TTL", "g"), ("GETEX", "g"), ("TTL", "g"),
+            ("GETEX", "g", "PX", "50000"), ("TTL", "g"), ("GETEX", "g", "PERSIST"), ("TTL", "g"), ("GETEX", "g", "PERSIST", "persist"),
+            ("GETEX", "g", "ex", "10", "EX", "20"), ("TTL", "g"), ("GETEX", "g", "EXAT", "99999999999"), ("PERSIST", "g"),
+            ("GETEX", "g", "EX", "10", "PX", "10"), ("GETEX", "g", "PERSIST", "EX", "5"), ("GETEX", "g", "EX", "5", "PERSIST"),
+            ("GETEX", "g", "EX"), ("GETEX", "g", "KEEPTTL"), ("GETEX", "g", "EX", "abc"), ("GETEX", "g", "EX", "0"),
+            ("GETEX", "g", "PX", "-1"), ("GETEX", "g", "EX", "9223372036854775807"), ("GETEX", "zz", "EX", "abc"), ("GETEX", "zz", "BOGUS"),
+            ("GETEX",), ("GETEX", "g", "PXAT", "1"), ("EXISTS", "g"), ("GETEX", "g"),
             ("TYPE", "s"), ("TYPE", "zz"), ("SELECT", "0"),
             ("GET",), ("SET", "only"), ("MSET", "a"), ("MSET", "a", "1", "b"), ("NOSUCHCMD", "arg1", "arg2"),
             ("MGET", "s", "kt", "nope"), ("KEYS", "*"), ("KEYS", "k*"), ("KEYS", "?t"), ("KEYS", "[ks]*"), ("KEYS", "nomatch*"),
@@ -233,6 +240,7 @@ class Differential(unittest.TestCase):
             lambda k: ("SETNX", k, rng.choice(vals)), lambda k: ("MGET", k, rng.choice(keys), rng.choice(keys)),
             lambda k: ("MSET", k, rng.choice(vals), rng.choice(keys), rng.choice(vals)),
             lambda k: ("EXPIRE", k, str(rng.randint(100, 1000))), lambda k: ("PERSIST", k), lambda k: ("TTL", k),
+            lambda k: ("GETEX", k, *rng.choice([(), ("EX", str(rng.randint(100, 1000))), ("PERSIST",)])),
             lambda k: ("TYPE", k), lambda k: ("DBSIZE",), lambda k: ("KEYS", "key1*"),
         ]
         for _ in range(5000):
@@ -380,6 +388,27 @@ class Persistence(unittest.TestCase):
         c = Conn(srv.port)
         self.assertIsNone(c.value("GET", "n"))  # not resurrected as a TTL-less "1"
         self.assertEqual(c.value("DBSIZE"), 0)
+        c.close()
+        srv.stop()
+
+    def test_getex_is_logged_as_what_it_did(self):
+        """GETEX goes to the log as PEXPIREAT, PERSIST or DEL, so a relative PX replays as the same absolute time."""
+        srv = self.start("--appendfsync", "always")
+        c = Conn(srv.port)
+        c.value("MSET", "rel", "1", "past", "3")
+        c.value("SET", "kept", "2", "PX", "300")
+        self.assertEqual(c.value("GETEX", "rel", "PX", "400"), b"1")
+        self.assertEqual(c.value("GETEX", "kept", "PERSIST"), b"2")
+        self.assertEqual(c.value("GETEX", "past", "PXAT", "1"), b"3")
+        c.close()
+        srv.stop()
+        with open(self.aof, "rb") as f:
+            self.assertNotIn(b"GETEX", f.read())
+        time.sleep(0.6)  # past both TTLs; logged as-is, "rel" would get a fresh 400 ms on replay
+        srv = self.start()
+        c = Conn(srv.port)
+        self.assertEqual(c.value("MGET", "rel", "kept", "past"), [None, b"2", None])
+        self.assertEqual(c.value("TTL", "kept"), -1)
         c.close()
         srv.stop()
 

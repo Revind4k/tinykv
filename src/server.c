@@ -516,6 +516,49 @@ static void cmd_getdel(client *c, int argc, arg *argv) {
     propagate(2, v);
 }
 
+/* GETEX key [EX s|PX ms|EXAT s|PXAT ms|PERSIST]. Options are checked before the lookup but
+ * the number only after it, as in Redis: `GETEX missing EX abc` is a nil, not an error.
+ * GETEX is never logged as itself; the AOF gets the PEXPIREAT, PERSIST or DEL it amounts to,
+ * so a relative EX replays as the same absolute time. */
+static void cmd_getex(client *c, int argc, arg *argv) {
+    int persist = 0, kind = EXP_NONE;
+    const arg *when = NULL;
+    for (int i = 2; i < argc; i++) {
+        arg *a = &argv[i];
+        int k = expire_kind(a);
+        if (arg_is(a, "PERSIST") && !kind) persist = 1;
+        else if (k && !persist && (!kind || k == kind) && i + 1 < argc) {
+            kind = k;
+            when = &argv[++i];
+        } else {
+            out_error(O, "ERR syntax error");
+            return;
+        }
+    }
+    entry *e = lookup(&argv[1]);
+    if (!e) {
+        out_null(O);
+        return;
+    }
+    long long at = NO_EXPIRE;
+    if (kind && parse_expire(c, kind, when, "getex", &at) != 0) return;
+    out_bulk(O, e->val, e->vlen);
+    if (kind && !expire_relative(kind) && at <= now_ms() && !S.loading) { /* EXAT/PXAT in the past */
+        dict_delete(&S.db, argv[1].p, argv[1].len);
+        arg d[2] = {{"DEL", 3}, argv[1]};
+        propagate(2, d);
+    } else if (kind) {
+        dict_set_expire(&S.db, e, at);
+        char b[24];
+        arg p[3] = {{"PEXPIREAT", 9}, argv[1], {b, (size_t)snprintf(b, sizeof(b), "%lld", at)}};
+        propagate(3, p);
+    } else if (persist && e->expire_at != NO_EXPIRE) {
+        dict_set_expire(&S.db, e, NO_EXPIRE);
+        arg p[2] = {{"PERSIST", 7}, argv[1]};
+        propagate(2, p);
+    }
+}
+
 static void cmd_mget(client *c, int argc, arg *argv) {
     out_array(O, argc - 1);
     for (int i = 1; i < argc; i++) {
@@ -841,6 +884,7 @@ static const command commands[] = {
     {"ping", -1, 0, cmd_ping},        {"echo", 2, 0, cmd_echo},          {"quit", 1, 0, cmd_quit},
     {"get", 2, 0, cmd_get},           {"set", -3, 1, cmd_set},           {"setnx", 3, 1, cmd_setnx},
     {"getdel", 2, 1, cmd_getdel},     {"mget", -2, 0, cmd_mget},         {"mset", -3, 1, cmd_mset},
+    {"getex", -2, 1, cmd_getex},
     {"del", -2, 1, cmd_del},          {"unlink", -2, 1, cmd_del},        {"exists", -2, 0, cmd_exists},
     {"incr", 2, 1, cmd_incr},         {"decr", 2, 1, cmd_decr},          {"incrby", 3, 1, cmd_incrby},
     {"decrby", 3, 1, cmd_decrby},     {"append", 3, 1, cmd_append},      {"strlen", 2, 0, cmd_strlen},
