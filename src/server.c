@@ -410,45 +410,63 @@ static void cmd_get(client *c, int argc, arg *argv) {
     else out_null(O);
 }
 
-/* SET key value [NX|XX] [GET] [EX s|PX ms|EXAT s|PXAT ms|KEEPTTL] */
+enum { EXP_NONE, EXP_EX, EXP_PX, EXP_EXAT, EXP_PXAT };
+
+static int expire_kind(const arg *a) {
+    if (arg_is(a, "EX")) return EXP_EX;
+    if (arg_is(a, "PX")) return EXP_PX;
+    if (arg_is(a, "EXAT")) return EXP_EXAT;
+    if (arg_is(a, "PXAT")) return EXP_PXAT;
+    return EXP_NONE;
+}
+
+static int expire_relative(int kind) { return kind == EXP_EX || kind == EXP_PX; }
+
+/* Turns the number after EX/PX/EXAT/PXAT into an absolute unix time in ms. On a bad value,
+ * replies with Redis' error for `cmd` and returns -1. */
+static int parse_expire(client *c, int kind, const arg *v, const char *cmd, long long *at) {
+    long long n;
+    if (parse_ll(v->p, v->len, &n) != 0) {
+        out_error(O, "ERR value is not an integer or out of range");
+        return -1;
+    }
+    int secs = kind == EXP_EX || kind == EXP_EXAT;
+    long long base = expire_relative(kind) ? now_ms() : 0;
+    if (n <= 0 || (secs && n > LLONG_MAX / 1000) || (secs ? n * 1000 : n) > LLONG_MAX - base) {
+        out_errorf(O, "ERR invalid expire time in '%s' command", cmd);
+        return -1;
+    }
+    *at = base + (secs ? n * 1000 : n);
+    return 0;
+}
+
+/* SET key value [NX|XX] [GET] [EX s|PX ms|EXAT s|PXAT ms|KEEPTTL]. As in Redis, repeating
+ * the same expire option is allowed and the last one wins, and its number is checked only
+ * after every option has parsed, so a syntax error later in the command is reported first. */
 static void cmd_set(client *c, int argc, arg *argv) {
-    int nx = 0, xx = 0, get = 0, keepttl = 0, has_exp = 0;
+    int nx = 0, xx = 0, get = 0, keepttl = 0, kind = EXP_NONE;
+    const arg *when = NULL;
     long long expire_at = NO_EXPIRE;
     for (int i = 3; i < argc; i++) {
         arg *a = &argv[i];
+        int k = expire_kind(a);
         if (arg_is(a, "NX")) nx = 1;
         else if (arg_is(a, "XX")) xx = 1;
         else if (arg_is(a, "GET")) get = 1;
         else if (arg_is(a, "KEEPTTL")) keepttl = 1;
-        else if ((arg_is(a, "EX") || arg_is(a, "PX") || arg_is(a, "EXAT") || arg_is(a, "PXAT")) && i + 1 < argc && !has_exp) {
-            long long v;
-            if (parse_ll(argv[i + 1].p, argv[i + 1].len, &v) != 0) {
-                out_error(O, "ERR value is not an integer or out of range");
-                return;
-            }
-            int secs = arg_is(a, "EX") || arg_is(a, "EXAT");
-            int rel = arg_is(a, "EX") || arg_is(a, "PX");
-            if (v <= 0 || (secs && v > LLONG_MAX / 1000)) {
-                out_errorf(O, "ERR invalid expire time in 'set' command");
-                return;
-            }
-            long long ms = secs ? v * 1000 : v;
-            if (rel && ms > LLONG_MAX - now_ms()) {
-                out_errorf(O, "ERR invalid expire time in 'set' command");
-                return;
-            }
-            expire_at = rel ? now_ms() + ms : ms;
-            has_exp = 1;
-            i++;
+        else if (k && (!kind || k == kind) && i + 1 < argc) {
+            kind = k;
+            when = &argv[++i];
         } else {
             out_error(O, "ERR syntax error");
             return;
         }
     }
-    if ((nx && xx) || (keepttl && has_exp)) {
+    if ((nx && xx) || (keepttl && kind)) {
         out_error(O, "ERR syntax error");
         return;
     }
+    if (kind && parse_expire(c, kind, when, "set", &expire_at) != 0) return;
     entry *old = lookup(&argv[1]);
     if (get) {
         if (old) out_bulk(O, old->val, old->vlen);
@@ -464,7 +482,7 @@ static void cmd_set(client *c, int argc, arg *argv) {
         out_error(O, "OOM command not allowed when used memory > 'maxmemory'.");
         return;
     }
-    if (has_exp) dict_set_expire(&S.db, e, expire_at);
+    if (kind) dict_set_expire(&S.db, e, expire_at);
     else if (keep != NO_EXPIRE) dict_set_expire(&S.db, e, keep);
     propagate_set(e); /* relative TTLs are logged as absolute PXAT, so replay is exact */
     if (!get) out_simple(O, "OK");

@@ -203,6 +203,8 @@ class Differential(unittest.TestCase):
             ("SET", "kt", "v", "EX", "100"), ("SET", "kt", "v2", "KEEPTTL"), ("TTL", "kt"), ("SET", "kt", "v3"), ("TTL", "kt"),
             ("SET", "x", "v", "EX", "0"), ("SET", "x", "v", "EX", "-5"), ("SET", "x", "v", "PX", "abc"), ("SET", "x", "v", "EX", "10", "PX", "10"),
             ("SET", "x", "v", "NX", "XX"), ("SET", "x", "v", "BOGUS"), ("SET", "x", "v", "EX", "10", "KEEPTTL"),
+            ("SET", "x", "v", "EX", "10", "EX", "20"), ("TTL", "x"), ("SET", "x", "v", "PX", "abc", "PX", "5000"), ("PTTL", "x"),
+            ("SET", "x", "v", "EX", "abc", "BOGUS"), ("SET", "x", "v", "EX", "abc", "NX", "XX"), ("SET", "x", "v", "PXAT", "1"), ("EXISTS", "x"),
             ("TYPE", "s"), ("TYPE", "zz"), ("SELECT", "0"),
             ("GET",), ("SET", "only"), ("MSET", "a"), ("MSET", "a", "1", "b"), ("NOSUCHCMD", "arg1", "arg2"),
             ("MGET", "s", "kt", "nope"), ("KEYS", "*"), ("KEYS", "k*"), ("KEYS", "?t"), ("KEYS", "[ks]*"), ("KEYS", "nomatch*"),
