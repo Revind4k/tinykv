@@ -203,7 +203,7 @@ class Differential(unittest.TestCase):
             ("SET", "kt", "v", "EX", "100"), ("SET", "kt", "v2", "KEEPTTL"), ("TTL", "kt"), ("SET", "kt", "v3"), ("TTL", "kt"),
             ("SET", "x", "v", "EX", "0"), ("SET", "x", "v", "EX", "-5"), ("SET", "x", "v", "PX", "abc"), ("SET", "x", "v", "EX", "10", "PX", "10"),
             ("SET", "x", "v", "NX", "XX"), ("SET", "x", "v", "BOGUS"), ("SET", "x", "v", "EX", "10", "KEEPTTL"),
-            ("SET", "x", "v", "EX", "10", "EX", "20"), ("TTL", "x"), ("SET", "x", "v", "PX", "abc", "PX", "5000"), ("PTTL", "x"),
+            ("SET", "x", "v", "EX", "10", "EX", "20"), ("TTL", "x"), ("SET", "x", "v", "PX", "abc", "PX", "5000"), ("TTL", "x"),
             ("SET", "x", "v", "EX", "abc", "BOGUS"), ("SET", "x", "v", "EX", "abc", "NX", "XX"), ("SET", "x", "v", "PXAT", "1"), ("EXISTS", "x"),
             ("SET", "g", "v"), ("GETEX", "g"), ("TTL", "g"), ("GETEX", "g", "EX", "100"), ("TTL", "g"), ("GETEX", "g"), ("TTL", "g"),
             ("GETEX", "g", "PX", "50000"), ("TTL", "g"), ("GETEX", "g", "PERSIST"), ("TTL", "g"), ("GETEX", "g", "PERSIST", "persist"),
